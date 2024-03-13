@@ -112,3 +112,20 @@ impl Bob {
         self.secret
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let alice = Alice::generate();
+        let bob = Bob::generate();
+
+        let eph = bob.encrypt_for_alice(&alice.public);
+        let shared_alice = alice.extract_shared_secret(eph);
+        let shared_bob = bob.extract_shared_secret();
+
+        assert_eq!(shared_alice, shared_bob)
+    }
+}

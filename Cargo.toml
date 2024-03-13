@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 crypto-bigint = { version = "0.5.5", features = ["rand_core"] }
 rand_core = { version = "0.6.4", features = ["std"] }
+
+[profile.test]
+opt-level = 3
