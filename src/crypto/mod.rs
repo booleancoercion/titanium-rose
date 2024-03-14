@@ -3,6 +3,7 @@ use rand_core::{OsRng, RngCore};
 pub mod elgamal;
 
 #[cfg_attr(test, derive(PartialEq, Eq, Debug))]
+#[derive(Clone)]
 pub struct SymmetricKey(u32); // change this!!
 
 impl SymmetricKey {
