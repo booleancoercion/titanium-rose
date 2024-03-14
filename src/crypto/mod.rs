@@ -1,21 +1,26 @@
-use rand_core::{OsRng, RngCore};
+use crypto_bigint::{Encoding, Limb, Uint};
+
+use self::twofish::{Key, KEY_BYTES};
 
 pub mod elgamal;
+pub mod twofish;
 
 #[cfg_attr(test, derive(PartialEq, Eq, Debug))]
 #[derive(Clone)]
-pub struct SymmetricKey(u32); // change this!!
+pub struct SymmetricKey(Key);
 
 impl SymmetricKey {
     fn generate() -> Self {
-        Self(OsRng.next_u32())
+        Self(Key::generate())
     }
 
     fn from_elgamal_int(int: &elgamal::Int) -> Self {
-        Self(int.as_words()[0] as u32)
+        let bytes = int.resize::<{ KEY_BYTES / Limb::BYTES }>().to_be_bytes();
+        Self(Key(bytes))
     }
 
     fn to_elgamal_int(&self) -> elgamal::Int {
-        elgamal::Int::from_u32(self.0)
+        let int = Uint::<{ KEY_BYTES / Limb::BYTES }>::from_be_bytes(self.0 .0);
+        int.resize()
     }
 }
