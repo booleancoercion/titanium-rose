@@ -10,9 +10,16 @@ eframe = "0.26.2"
 base64 = "0.22.0"
 serde = { version = "1.0.197", features = ["derive"] }
 bincode = "1.3.3"
+bytemuck = { version = "1.15.0", features = [
+    "must_cast",
+    "min_const_generics",
+] }
 
 [profile.test]
 opt-level = 3
 
 [profile.dev]
 opt-level = 3
+
+[dev-dependencies]
+twofish = "0.7.1"
