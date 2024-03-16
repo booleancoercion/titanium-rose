@@ -53,12 +53,12 @@ enum MyEguiApp {
 
 enum AliceSetup {
     Generating(mpsc::Receiver<Alice>),
-    WaitingForBob(Alice, &'static str, String),
+    WaitingForBob(Alice, &'static str, String, bool),
     Computing(mpsc::Receiver<SymmetricKey>),
 }
 
 enum BobSetup {
-    WaitingForAlice(Bob, String),
+    WaitingForAlice(Bob, String, bool),
     Generating(Bob, mpsc::Receiver<BobEphemeral>),
     Final(Bob, &'static str),
 }
@@ -83,31 +83,47 @@ impl MyEguiApp {
 
         let ekey = key.clone();
         thread::spawn(move || loop {
-            let input: String = remote_erx.recv().unwrap();
+            let Some(input): Option<String> = remote_erx.recv().ok() else {
+                break;
+            };
             let bytes = ekey.encrypt(input.as_bytes());
             let b64 = STANDARD_NO_PAD.encode(&bytes);
-            remote_etx.send(b64).unwrap();
+            if remote_etx.send(b64).is_err() {
+                break;
+            }
         });
 
         let (dtx, remote_drx) = mpsc::channel();
         let (remote_dtx, drx) = mpsc::channel();
 
         thread::spawn(move || loop {
-            let input: String = remote_drx.recv().unwrap();
+            let Some(input): Option<String> = remote_drx.recv().ok() else {
+                break;
+            };
             let Ok(decoded) = STANDARD_NO_PAD.decode(input) else {
-                remote_dtx.send(None).unwrap();
-                continue;
+                if remote_dtx.send(None).is_ok() {
+                    continue;
+                } else {
+                    break;
+                }
             };
 
             let Some(plaintext) = key.decrypt(&decoded) else {
-                remote_dtx.send(None).unwrap();
-                continue;
+                if remote_dtx.send(None).is_ok() {
+                    continue;
+                } else {
+                    break;
+                }
             };
 
-            if let Ok(string) = String::from_utf8(plaintext) {
-                remote_dtx.send(Some(string)).unwrap();
+            let res = if let Ok(string) = String::from_utf8(plaintext) {
+                remote_dtx.send(Some(string))
             } else {
-                remote_dtx.send(None).unwrap();
+                remote_dtx.send(None)
+            };
+
+            if res.is_err() {
+                break;
             }
         });
 
@@ -159,6 +175,7 @@ impl eframe::App for MyEguiApp {
                             *self = MyEguiApp::BobSetup(BobSetup::WaitingForAlice(
                                 Bob::generate(),
                                 String::new(),
+                                false,
                             ));
                         }
                     });
@@ -177,13 +194,19 @@ impl eframe::App for MyEguiApp {
                                 alice,
                                 public_text.leak(),
                                 String::new(),
+                                false,
                             ))
                         }
                         Err(mpsc::TryRecvError::Empty) => {}
                         Err(mpsc::TryRecvError::Disconnected) => unreachable!(),
                     }
                 }
-                MyEguiApp::AliceSetup(AliceSetup::WaitingForBob(alice, public_text, input)) => {
+                MyEguiApp::AliceSetup(AliceSetup::WaitingForBob(
+                    alice,
+                    public_text,
+                    input,
+                    invalid_input,
+                )) => {
                     ui.heading("Copy your public key and send it to Bob:");
 
                     ScrollArea::vertical()
@@ -198,20 +221,38 @@ impl eframe::App for MyEguiApp {
 
                     ui.heading("Enter Bob's response:");
 
-                    ScrollArea::vertical()
+                    let textedit = ScrollArea::vertical()
                         .id_source("second scroll area")
                         .max_height(TEXT_SCROLLER_MAX_HEIGHT)
                         .show(ui, |ui| {
                             TextEdit::multiline(input)
                                 .desired_rows(TEXT_DESIRED_ROWS)
                                 .layouter(&mut my_layouter)
-                                .show(ui);
-                        });
+                                .show(ui)
+                                .response
+                        })
+                        .inner;
 
-                    if ui.button("Continue").clicked() {
-                        // TODO: verify input correctness
-                        let bytes = STANDARD_NO_PAD.decode(input).unwrap();
-                        let eph: BobEphemeral = bincode::deserialize(&bytes).unwrap();
+                    if textedit.changed() {
+                        *invalid_input = false;
+                    }
+
+                    let button = ui.button("Continue");
+
+                    if *invalid_input {
+                        ui.colored_label(ui.style().visuals.error_fg_color, "invalid input");
+                    }
+
+                    if button.clicked() {
+                        let Some(bytes) = STANDARD_NO_PAD.decode(input).ok() else {
+                            *invalid_input = true;
+                            return;
+                        };
+                        let Some(eph): Option<BobEphemeral> = bincode::deserialize(&bytes).ok()
+                        else {
+                            *invalid_input = true;
+                            return;
+                        };
 
                         let (tx, rx) = mpsc::channel();
                         let alice = alice.clone();
@@ -235,22 +276,41 @@ impl eframe::App for MyEguiApp {
                         Err(mpsc::TryRecvError::Disconnected) => unreachable!(),
                     }
                 }
-                MyEguiApp::BobSetup(BobSetup::WaitingForAlice(bob, input)) => {
+                MyEguiApp::BobSetup(BobSetup::WaitingForAlice(bob, input, invalid_input)) => {
                     ui.heading("Enter Alice's public key:");
 
-                    ScrollArea::vertical()
+                    let textedit = ScrollArea::vertical()
                         .max_height(TEXT_SCROLLER_MAX_HEIGHT)
                         .show(ui, |ui| {
                             TextEdit::multiline(input)
                                 .desired_rows(TEXT_DESIRED_ROWS)
                                 .layouter(&mut my_layouter)
-                                .show(ui);
-                        });
+                                .show(ui)
+                                .response
+                        })
+                        .inner;
 
-                    if ui.button("Continue").clicked() {
+                    if textedit.changed() {
+                        *invalid_input = false;
+                    }
+
+                    let button = ui.button("Continue");
+
+                    if *invalid_input {
+                        ui.colored_label(ui.style().visuals.error_fg_color, "invalid input");
+                    }
+
+                    if button.clicked() {
                         // TODO: verify input correctness
-                        let bytes = STANDARD_NO_PAD.decode(input).unwrap();
-                        let public: AlicePub = bincode::deserialize(&bytes).unwrap();
+                        let Some(bytes) = STANDARD_NO_PAD.decode(input).ok() else {
+                            *invalid_input = true;
+                            return;
+                        };
+                        let Some(public): Option<AlicePub> = bincode::deserialize(&bytes).ok()
+                        else {
+                            *invalid_input = true;
+                            return;
+                        };
 
                         let (tx, rx) = mpsc::channel();
                         {
@@ -424,7 +484,10 @@ impl eframe::App for MyEguiApp {
                             columns[1].spinner();
                         }
                         if *failed_to_decrypt {
-                            columns[1].label("failed to decrypt");
+                            columns[1].colored_label(
+                                columns[1].style().visuals.error_fg_color,
+                                "failed to decrypt",
+                            );
                         }
                     });
                 }
