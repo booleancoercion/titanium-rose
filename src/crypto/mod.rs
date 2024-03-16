@@ -4,6 +4,7 @@ use rand_core::{OsRng, RngCore};
 use self::twofish::{Block, Key};
 
 pub mod elgamal;
+pub mod sha256;
 pub mod twofish;
 
 #[cfg_attr(test, derive(PartialEq, Eq, Debug))]

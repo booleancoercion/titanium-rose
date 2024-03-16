@@ -23,3 +23,4 @@ opt-level = 3
 
 [dev-dependencies]
 twofish = "0.7.1"
+sha2 = "0.10.8"
