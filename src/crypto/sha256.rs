@@ -55,7 +55,7 @@ fn hash_round(block: Block, hash: &mut [Word; 8]) {
 type Word = u32;
 type Block = [Word; BLOCK_WORDS];
 
-const BLOCK_BYTES: usize = 512 / 8;
+pub const BLOCK_BYTES: usize = 512 / 8;
 const BLOCK_WORDS: usize = 512 / 32;
 const WORD_BYTES: usize = 32 / 8;
 

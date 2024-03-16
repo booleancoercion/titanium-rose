@@ -1,20 +1,21 @@
 use crypto_bigint::{Encoding, Limb, Uint};
 use rand_core::{OsRng, RngCore};
 
-use self::twofish::{Block, Key};
+use self::hmac::hmac;
 
 pub mod elgamal;
+pub mod hmac;
 pub mod sha256;
 pub mod twofish;
 
 #[cfg_attr(test, derive(PartialEq, Eq, Debug))]
 #[derive(Clone)]
-pub struct SymmetricKey(Key);
+pub struct SymmetricKey(twofish::Key, hmac::Key);
 
 impl SymmetricKey {
     #[cfg(debug_assertions)]
     pub fn generate() -> Self {
-        Self(Key::generate())
+        Self(twofish::Key::generate(), hmac::Key::generate())
     }
 
     #[cfg(not(debug_assertions))]
@@ -24,13 +25,21 @@ impl SymmetricKey {
 
     fn from_elgamal_int(int: &elgamal::Int) -> Self {
         let bytes = int
-            .resize::<{ twofish::KEY_BYTES / Limb::BYTES }>()
+            .resize::<{ (twofish::KEY_BYTES + hmac::KEY_BYTES) / Limb::BYTES }>()
             .to_be_bytes();
-        Self(Key(bytes))
+        let twofish_bytes: [u8; twofish::KEY_BYTES] =
+            bytes[..twofish::KEY_BYTES].try_into().unwrap();
+        let hmac_bytes: [u8; hmac::KEY_BYTES] = bytes[twofish::KEY_BYTES..].try_into().unwrap();
+        Self(twofish::Key(twofish_bytes), hmac::Key(hmac_bytes))
     }
 
     fn to_elgamal_int(&self) -> elgamal::Int {
-        let int = Uint::<{ twofish::KEY_BYTES / Limb::BYTES }>::from_be_bytes(self.0 .0);
+        let mut bytes = Vec::with_capacity(twofish::KEY_BYTES + hmac::KEY_BYTES);
+        bytes.extend_from_slice(&self.0 .0);
+        bytes.extend_from_slice(&self.1 .0);
+        let int = Uint::<{ (twofish::KEY_BYTES + hmac::KEY_BYTES) / Limb::BYTES }>::from_be_bytes(
+            bytes.try_into().unwrap(),
+        );
         int.resize()
     }
 
@@ -42,7 +51,7 @@ impl SymmetricKey {
         };
 
         let padded = pad(data);
-        let blocks = bytemuck::cast_slice::<_, Block>(&padded);
+        let blocks = bytemuck::cast_slice::<_, twofish::Block>(&padded);
 
         let mut ciphertext = Vec::with_capacity(blocks.len() * twofish::BLOCK_BYTES);
         let mut xorrer = iv;
@@ -52,12 +61,31 @@ impl SymmetricKey {
             ciphertext.extend_from_slice(&xorrer);
         }
 
-        CompleteCiphertext { ciphertext, iv }.serialize()
+        let mut to_mac = Vec::with_capacity(iv.len() + ciphertext.len());
+        to_mac.extend_from_slice(&iv);
+        to_mac.extend_from_slice(&ciphertext);
+        let mac = hmac(&self.1, &to_mac);
+
+        CompleteCiphertext {
+            ciphertext,
+            iv,
+            mac,
+        }
+        .serialize()
     }
 
     pub fn decrypt(&self, data: &[u8]) -> Option<Vec<u8>> {
-        let CompleteCiphertext { ciphertext, iv } = CompleteCiphertext::deserialize(data)?;
-        let Ok(blocks) = bytemuck::try_cast_slice::<_, Block>(&ciphertext) else {
+        let CompleteCiphertext {
+            ciphertext,
+            iv,
+            mac,
+        } = CompleteCiphertext::deserialize(data)?;
+
+        let calculated_mac = hmac(&self.1, &data[sha256::DIGEST_BYTES..]);
+        if mac != calculated_mac {
+            return None;
+        }
+        let Ok(blocks) = bytemuck::try_cast_slice::<_, twofish::Block>(&ciphertext) else {
             return None;
         };
 
@@ -78,7 +106,7 @@ impl SymmetricKey {
     }
 }
 
-fn xor_block(a: &Block, b: &Block) -> Block {
+fn xor_block(a: &twofish::Block, b: &twofish::Block) -> twofish::Block {
     let mut output = [0u8; twofish::BLOCK_BYTES];
     for i in 0..twofish::BLOCK_BYTES {
         output[i] = a[i] ^ b[i];
@@ -119,24 +147,69 @@ fn remove_padding(data: &mut Vec<u8>) -> bool {
 
 struct CompleteCiphertext {
     ciphertext: Vec<u8>,
-    iv: Block,
+    iv: twofish::Block,
+    mac: sha256::Digest,
 }
 
 impl CompleteCiphertext {
     pub fn serialize(self) -> Vec<u8> {
-        let Self { ciphertext, iv } = self;
-        let mut output = Vec::with_capacity(iv.len() + ciphertext.len());
+        let Self {
+            ciphertext,
+            iv,
+            mac,
+        } = self;
+        let mut output = Vec::with_capacity(mac.len() + iv.len() + ciphertext.len());
 
+        output.extend_from_slice(&mac);
         output.extend_from_slice(&iv);
         output.extend_from_slice(&ciphertext);
 
         output
     }
 
-    pub fn deserialize(data: &[u8]) -> Option<Self> {
-        let iv: Block = data[0..twofish::BLOCK_BYTES].try_into().ok()?;
-        let ciphertext = data[twofish::BLOCK_BYTES..].to_owned();
+    pub fn deserialize(mut data: &[u8]) -> Option<Self> {
+        let mac: sha256::Digest = data[0..sha256::DIGEST_BYTES].try_into().ok()?;
+        data = &data[sha256::DIGEST_BYTES..];
 
-        Some(Self { ciphertext, iv })
+        let iv: twofish::Block = data[0..twofish::BLOCK_BYTES].try_into().ok()?;
+        data = &data[twofish::BLOCK_BYTES..];
+
+        let ciphertext = data.to_owned();
+
+        Some(Self {
+            ciphertext,
+            iv,
+            mac,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encryption_decryption_symmetric() {
+        let skey = SymmetricKey::generate();
+        let data = b"Hello, World!";
+
+        let encrypted = skey.encrypt(data);
+        let decrypted = skey.decrypt(&encrypted).unwrap();
+
+        assert_eq!(data, &*decrypted)
+    }
+
+    #[test]
+    fn iv_tamper() {
+        let skey = SymmetricKey::generate();
+        let data = b"Hello, World!";
+
+        let mut encrypted = skey.encrypt(data);
+        let mut ciphertext = CompleteCiphertext::deserialize(&encrypted).unwrap();
+        ciphertext.iv[0] ^= 42;
+        encrypted = ciphertext.serialize();
+
+        let decrypted = skey.decrypt(&encrypted);
+        assert!(decrypted.is_none());
     }
 }
