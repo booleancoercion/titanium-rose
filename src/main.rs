@@ -1,22 +1,17 @@
 #![allow(clippy::large_enum_variant)]
 
-use std::{
-    env,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Arc,
-    },
-    thread,
-};
+use std::env;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
+use std::thread;
 
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
-use eframe::egui::{
-    self, text::LayoutJob, Button, Galley, RichText, ScrollArea, Style, TextEdit, ViewportBuilder,
-};
-use titanium_rose::crypto::{
-    elgamal::{Alice, AlicePub, Bob, BobEphemeral},
-    SymmetricKey,
-};
+use base64::engine::general_purpose::STANDARD_NO_PAD;
+use base64::Engine;
+use eframe::egui::text::LayoutJob;
+use eframe::egui::{self, Button, Galley, RichText, ScrollArea, Style, TextEdit, ViewportBuilder};
+
+use titanium_rose::crypto::elgamal::{Alice, AlicePub, Bob, BobEphemeral};
+use titanium_rose::crypto::SymmetricKey;
 
 fn main() {
     let native_options = eframe::NativeOptions {
