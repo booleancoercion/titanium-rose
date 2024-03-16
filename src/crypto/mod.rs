@@ -1,6 +1,5 @@
 use crypto_bigint::{Encoding, Limb, Uint};
 use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Serialize};
 
 use self::twofish::{Block, Key};
 
@@ -52,14 +51,11 @@ impl SymmetricKey {
             ciphertext.extend_from_slice(&xorrer);
         }
 
-        let ciphertext = CompleteCiphertext { ciphertext, iv };
-        bincode::serialize(&ciphertext).unwrap()
+        CompleteCiphertext { ciphertext, iv }.serialize()
     }
 
     pub fn decrypt(&self, data: &[u8]) -> Option<Vec<u8>> {
-        let Ok(CompleteCiphertext { ciphertext, iv }) = bincode::deserialize(data) else {
-            return None;
-        };
+        let CompleteCiphertext { ciphertext, iv } = CompleteCiphertext::deserialize(data)?;
         let Ok(blocks) = bytemuck::try_cast_slice::<_, Block>(&ciphertext) else {
             return None;
         };
@@ -120,8 +116,26 @@ fn remove_padding(data: &mut Vec<u8>) -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize)]
 struct CompleteCiphertext {
     ciphertext: Vec<u8>,
     iv: Block,
+}
+
+impl CompleteCiphertext {
+    pub fn serialize(self) -> Vec<u8> {
+        let Self { ciphertext, iv } = self;
+        let mut output = Vec::with_capacity(iv.len() + ciphertext.len());
+
+        output.extend_from_slice(&iv);
+        output.extend_from_slice(&ciphertext);
+
+        output
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        let iv: Block = data[0..twofish::BLOCK_BYTES].try_into().ok()?;
+        let ciphertext = data[twofish::BLOCK_BYTES..].to_owned();
+
+        Some(Self { ciphertext, iv })
+    }
 }
