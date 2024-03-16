@@ -1,13 +1,17 @@
 #![allow(clippy::large_enum_variant)]
 
 use std::{
-    sync::{mpsc, Arc},
+    env,
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc,
+    },
     thread,
 };
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use eframe::egui::{
-    self, text::LayoutJob, Galley, RichText, ScrollArea, Style, TextEdit, ViewportBuilder,
+    self, text::LayoutJob, Button, Galley, RichText, ScrollArea, Style, TextEdit, ViewportBuilder,
 };
 use titanium_rose::crypto::{
     elgamal::{Alice, AlicePub, Bob, BobEphemeral},
@@ -36,7 +40,20 @@ enum MyEguiApp {
     Initial,
     AliceSetup(AliceSetup),
     BobSetup(BobSetup),
-    Final(SymmetricKey),
+    Final {
+        encrypt_input: String,
+        encrypt_output: String,
+        encrypt_enabled: bool,
+        encrypting: bool,
+        encrypt_channel: (Sender<String>, Receiver<String>),
+
+        decrypt_input: String,
+        decrypt_output: String,
+        decrypt_enabled: bool,
+        decrypting: bool,
+        failed_to_decrypt: bool,
+        decrypt_channel: (Sender<String>, Receiver<Option<String>>),
+    },
 }
 
 enum AliceSetup {
@@ -57,9 +74,67 @@ impl MyEguiApp {
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
+        #[cfg(debug_assertions)]
+        if env::var("SKIP_SETUP").is_ok() {
+            return Self::new_final(SymmetricKey::generate());
+        }
+
         Self::default()
     }
+
+    fn new_final(key: SymmetricKey) -> Self {
+        let (etx, remote_erx) = mpsc::channel();
+        let (remote_etx, erx) = mpsc::channel();
+
+        let ekey = key.clone();
+        thread::spawn(move || loop {
+            let input: String = remote_erx.recv().unwrap();
+            let bytes = ekey.encrypt(input.as_bytes());
+            let b64 = STANDARD_NO_PAD.encode(&bytes);
+            remote_etx.send(b64).unwrap();
+        });
+
+        let (dtx, remote_drx) = mpsc::channel();
+        let (remote_dtx, drx) = mpsc::channel();
+
+        thread::spawn(move || loop {
+            let input: String = remote_drx.recv().unwrap();
+            let Ok(decoded) = STANDARD_NO_PAD.decode(input) else {
+                remote_dtx.send(None).unwrap();
+                continue;
+            };
+
+            let Some(plaintext) = key.decrypt(&decoded) else {
+                remote_dtx.send(None).unwrap();
+                continue;
+            };
+
+            if let Ok(string) = String::from_utf8(plaintext) {
+                remote_dtx.send(Some(string)).unwrap();
+            } else {
+                remote_dtx.send(None).unwrap();
+            }
+        });
+
+        Self::Final {
+            encrypt_input: String::new(),
+            encrypt_output: String::new(),
+            encrypt_enabled: true,
+            encrypting: false,
+            encrypt_channel: (etx, erx),
+
+            decrypt_input: String::new(),
+            decrypt_output: String::new(),
+            decrypt_enabled: true,
+            decrypting: false,
+            failed_to_decrypt: false,
+            decrypt_channel: (dtx, drx),
+        }
+    }
 }
+
+const TEXT_DESIRED_ROWS: usize = 6;
+const TEXT_SCROLLER_MAX_HEIGHT: f32 = 15.0 * (TEXT_DESIRED_ROWS as f32);
 
 impl eframe::App for MyEguiApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
@@ -118,9 +193,10 @@ impl eframe::App for MyEguiApp {
 
                     ScrollArea::vertical()
                         .id_source("first scroll area")
-                        .max_height(100.0)
+                        .max_height(TEXT_SCROLLER_MAX_HEIGHT)
                         .show(ui, |ui| {
                             TextEdit::multiline(public_text)
+                                .desired_rows(TEXT_DESIRED_ROWS)
                                 .layouter(&mut my_layouter)
                                 .show(ui);
                         });
@@ -129,9 +205,10 @@ impl eframe::App for MyEguiApp {
 
                     ScrollArea::vertical()
                         .id_source("second scroll area")
-                        .max_height(100.0)
+                        .max_height(TEXT_SCROLLER_MAX_HEIGHT)
                         .show(ui, |ui| {
                             TextEdit::multiline(input)
+                                .desired_rows(TEXT_DESIRED_ROWS)
                                 .layouter(&mut my_layouter)
                                 .show(ui);
                         });
@@ -158,7 +235,7 @@ impl eframe::App for MyEguiApp {
                     });
 
                     match rx.try_recv() {
-                        Ok(key) => *self = MyEguiApp::Final(key),
+                        Ok(key) => *self = MyEguiApp::new_final(key),
                         Err(mpsc::TryRecvError::Empty) => {}
                         Err(mpsc::TryRecvError::Disconnected) => unreachable!(),
                     }
@@ -167,10 +244,10 @@ impl eframe::App for MyEguiApp {
                     ui.heading("Enter Alice's public key:");
 
                     ScrollArea::vertical()
-                        .id_source("second scroll area")
-                        .max_height(100.0)
+                        .max_height(TEXT_SCROLLER_MAX_HEIGHT)
                         .show(ui, |ui| {
                             TextEdit::multiline(input)
+                                .desired_rows(TEXT_DESIRED_ROWS)
                                 .layouter(&mut my_layouter)
                                 .show(ui);
                         });
@@ -210,19 +287,151 @@ impl eframe::App for MyEguiApp {
                 }
                 MyEguiApp::BobSetup(BobSetup::Final(bob, text)) => {
                     ui.heading("Send the encrypted shared secret to Alice:");
-                    ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                        TextEdit::multiline(text)
-                            .layouter(&mut my_layouter)
-                            .show(ui);
-                    });
+                    ScrollArea::vertical()
+                        .max_height(TEXT_SCROLLER_MAX_HEIGHT)
+                        .show(ui, |ui| {
+                            TextEdit::multiline(text)
+                                .desired_rows(TEXT_DESIRED_ROWS)
+                                .layouter(&mut my_layouter)
+                                .show(ui);
+                        });
 
                     if ui.button("Continue").clicked() {
                         let key = bob.extract_shared_secret();
-                        *self = MyEguiApp::Final(key);
+                        *self = MyEguiApp::new_final(key);
                     }
                 }
-                MyEguiApp::Final(key) => {
-                    //
+                MyEguiApp::Final {
+                    encrypt_input,
+                    encrypt_output,
+                    encrypt_enabled,
+                    encrypting,
+                    encrypt_channel,
+
+                    decrypt_input,
+                    decrypt_output,
+                    decrypt_enabled,
+                    decrypting,
+                    failed_to_decrypt,
+                    decrypt_channel,
+                } => {
+                    if *encrypting {
+                        match encrypt_channel.1.try_recv() {
+                            Ok(string) => {
+                                *encrypt_output = string;
+                                *encrypting = false
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {}
+                            Err(mpsc::TryRecvError::Disconnected) => unreachable!(),
+                        }
+                    }
+
+                    if *decrypting {
+                        match decrypt_channel.1.try_recv() {
+                            Ok(Some(string)) => {
+                                *decrypt_output = string;
+                                *decrypting = false
+                            }
+                            Ok(None) => {
+                                *decrypting = false;
+                                *failed_to_decrypt = true;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {}
+                            Err(mpsc::TryRecvError::Disconnected) => unreachable!(),
+                        }
+                    }
+
+                    ui.columns(2, |columns| {
+                        columns[0].heading("Encrypt Text");
+                        let encrypt_input_response = ScrollArea::vertical()
+                            .id_source("encrypt input")
+                            .max_height(TEXT_SCROLLER_MAX_HEIGHT)
+                            .show(&mut columns[0], |ui| {
+                                ui.add_enabled(
+                                    !*encrypting,
+                                    TextEdit::multiline(encrypt_input)
+                                        .desired_rows(TEXT_DESIRED_ROWS)
+                                        .layouter(&mut my_layouter),
+                                )
+                            })
+                            .inner;
+
+                        if encrypt_input_response.changed() {
+                            encrypt_output.clear();
+                            *encrypt_enabled = true;
+                        }
+
+                        ScrollArea::vertical()
+                            .id_source("encrypt output")
+                            .max_height(TEXT_SCROLLER_MAX_HEIGHT)
+                            .show(&mut columns[0], |ui| {
+                                TextEdit::multiline(&mut encrypt_output.as_str())
+                                    .desired_rows(TEXT_DESIRED_ROWS)
+                                    .layouter(&mut my_layouter)
+                                    .show(ui)
+                                    .response
+                            });
+
+                        let encrypt_button =
+                            columns[0].add_enabled(*encrypt_enabled, Button::new("Encrypt"));
+
+                        if encrypt_button.clicked() {
+                            *encrypt_enabled = false;
+                            *encrypting = true;
+                            encrypt_channel.0.send(encrypt_input.clone()).unwrap();
+                        }
+
+                        if *encrypting {
+                            columns[0].spinner();
+                        }
+
+                        columns[1].heading("Decrypt Text");
+                        let decrypt_input_response = ScrollArea::vertical()
+                            .id_source("decrypt input")
+                            .max_height(TEXT_SCROLLER_MAX_HEIGHT)
+                            .show(&mut columns[1], |ui| {
+                                ui.add_enabled(
+                                    !*decrypting,
+                                    TextEdit::multiline(decrypt_input)
+                                        .desired_rows(TEXT_DESIRED_ROWS)
+                                        .layouter(&mut my_layouter),
+                                )
+                            })
+                            .inner;
+
+                        if decrypt_input_response.changed() {
+                            decrypt_output.clear();
+                            *decrypt_enabled = true;
+                            *failed_to_decrypt = false;
+                        }
+
+                        ScrollArea::vertical()
+                            .id_source("decrypt output")
+                            .max_height(TEXT_SCROLLER_MAX_HEIGHT)
+                            .show(&mut columns[1], |ui| {
+                                TextEdit::multiline(&mut decrypt_output.as_str())
+                                    .desired_rows(TEXT_DESIRED_ROWS)
+                                    .layouter(&mut my_layouter)
+                                    .show(ui)
+                                    .response
+                            });
+
+                        let decrypt_button =
+                            columns[1].add_enabled(*decrypt_enabled, Button::new("Decrypt"));
+
+                        if decrypt_button.clicked() {
+                            *decrypt_enabled = false;
+                            *decrypting = true;
+                            decrypt_channel.0.send(decrypt_input.clone()).unwrap();
+                        }
+
+                        if *decrypting {
+                            columns[1].spinner();
+                        }
+                        if *failed_to_decrypt {
+                            columns[1].label("failed to decrypt");
+                        }
+                    });
                 }
             }
         });

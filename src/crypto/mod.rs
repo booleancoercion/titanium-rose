@@ -12,6 +12,12 @@ pub mod twofish;
 pub struct SymmetricKey(Key);
 
 impl SymmetricKey {
+    #[cfg(debug_assertions)]
+    pub fn generate() -> Self {
+        Self(Key::generate())
+    }
+
+    #[cfg(not(debug_assertions))]
     fn generate() -> Self {
         Self(Key::generate())
     }
