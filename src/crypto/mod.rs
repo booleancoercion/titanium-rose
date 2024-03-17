@@ -20,7 +20,7 @@ impl SymmetricKey {
 
     #[cfg(not(debug_assertions))]
     fn generate() -> Self {
-        Self(Key::generate())
+        Self(twofish::Key::generate(), hmac::Key::generate())
     }
 
     fn from_elgamal_int(int: &elgamal::Int) -> Self {

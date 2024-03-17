@@ -1,6 +1,8 @@
 #![allow(clippy::large_enum_variant)]
 
+#[cfg(debug_assertions)]
 use std::env;
+
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
