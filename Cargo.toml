@@ -21,6 +21,10 @@ opt-level = 3
 [profile.dev]
 opt-level = 3
 
+[profile.release]
+opt-level = 3
+strip = true
+
 [dev-dependencies]
 twofish = "0.7.1"
 sha2 = "0.10.8"
